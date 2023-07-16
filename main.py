@@ -99,7 +99,7 @@ def handle_client(client_socket, address):
         if not data:
             break
 
-        # 데이터 수신 후 '/'를 기준으로 분류하여 상품명, 구매희망가격, 상품링크를 추출합니다.
+        # 데이터 수신 후 '/'를 기준으로 분류하여 상품명, 구매희망가격, 상품링크를 추출
         product_name, desired_price, product_link = data.split(',')
 
         # 서브스레드 생성하여 ItemThread 클래스 실행
