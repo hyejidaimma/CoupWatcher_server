@@ -29,14 +29,14 @@ class ItemThread(threading.Thread):
 
             soup = BeautifulSoup(res.text, "html.parser")
 
-            # 가격 정보를 추출합니다. 적절한 선택자를 사용해야 합니다.
+            # 가격 정보를 추출
             price_element = soup.select_one(".total-price")
 
             if price_element:
                 # 문자열을 정수로 변환
                 self.crawled_price = int(price_element.get_text(strip=True).replace(",", "").replace("원", ""))
 
-                # 클라이언트 전송 테스트용
+                # (파이썬)클라이언트 전송 테스트용
                 self.client_socket.send(price_element.encode())
 
                 #self.crawled_price = price_element.get_text(strip=True)
@@ -51,18 +51,18 @@ class ItemThread(threading.Thread):
         sum_price = 0
         while self.running:
             if self.crawlingTest():
-                # 현재 시간을 받아옵니다.
+                # 현재 시간 받아옴
                 current_time = time.localtime()
                 current_time_str = time.strftime("%Y-%m-%d %H:%M:%S", current_time)
 
-                # 정각일 때만 가격을 기록합니다.
+                # 정각일 때만 가격을 기록
                 if current_time.tm_min != 0 or current_time.tm_sec != 0:
                     continue
                 time.sleep(1) # 중복 방지
 
-                # 정각에 맞춰 주기적으로 크롤링하여 가격 정보를 클라이언트에 전송합니다.
+                # 정각에 맞춰 주기적으로 크롤링하여 가격 정보를 클라이언트에 전송
                 if self.crawled_price:
-                    # 가격을 정수로 변환하여 클라이언트에게 송신하는 로직을 작성합니다.
+                    # 가격을 정수로 변환하여 클라이언트에게 송신
                     print(f"Price at {current_time_str}: {self.crawled_price}원")
                     sum_price += self.crawled_price
 
@@ -70,18 +70,18 @@ class ItemThread(threading.Thread):
                 if self.crawled_count % 24 == 0:
                     self.average_price = int(sum_price/24)
 
-                    # self.average_price를 client로 send
-                    data = current_time_str + '/' + str(self.average_price)
+                    # 그래프를 작성하기 위한 날짜,가격 정보 송신
+                    #data = current_time_str + '/' + str(self.average_price)
+                    data = f'{current_time.tm_mon}/{current_time.tm_mday}' + '/' + str(self.average_price)
                     self.client_socket.send(data.encode())
-
                     self.crawled_count = 0
                     self.average_price = 0
                     sum_price = 0
 
     def showCurrentPrice(self):
-        if self.crawled_price:
-            # 현재 가격을 클라이언트에게 송신하는 로직을 작성합니다.
-            print(f"Current price: {self.crawled_price}")
+        self.crawlingTest()
+        print(f"Current price: {self.crawled_price}")
+        self.client_socket.send(str(self.crawled_price).encode())
 
     def killThread(self):
         self.running = False
@@ -90,6 +90,7 @@ class ItemThread(threading.Thread):
 
     def run(self):
         self.crawlingOnTime()
+        #self.showCurrentPrice()
 
 
 def handle_client(client_socket, address):
