@@ -3,20 +3,77 @@ import socket
 import time
 import requests
 from bs4 import BeautifulSoup
+from concurrent.futures import ThreadPoolExecutor
+import pandas as pd
 
+# 인터페이스 정의
+class DataCrawler:
+    def crawl(self):
+        pass
 
-class ItemWorker:
-    def __init__(self, client_socket, product_name, desired_price, product_link):
-        self.client_socket = client_socket
+class PriceNotifier:
+    def notify(self, product_name, price):
+        pass
+
+class Server:
+    def __init__(self):
+        self.executor = ThreadPoolExecutor(max_workers=10)
+        self.running = True
+        self.data_list = []
+
+    def handle_client(self, client_socket, address):
+        while self.running:
+            data = client_socket.recv(1024).decode()
+            if not data:
+                break
+
+            # 'zgq'를 수신한 경우
+            if data == 'zgq':
+                self.show_current_price(client_socket)
+            else:
+                # 'zgq'가 아닌 다른 데이터인 경우, 데이터를 파싱하여 처리하기 위해 서브 스레드 생성
+                threading.Thread(target=self.process_data, args=(data, client_socket)).start()
+
+        # 클라이언트와의 연결 종료 후 정리
+        client_socket.close()
+
+    def process_data(self, data, client_socket):
+        # 데이터 파싱하여 상품명, 구매희망가격, 상품링크를 추출
+        product_name, desired_price, product_link = data.split(',')
+
+        # 스레드 풀을 사용하여 작업 처리
+        data_crawler = ItemDataCrawler(product_name, desired_price, product_link)
+        price_notifier = PriceNotifierImpl(client_socket, self.data_list)
+        data_crawler.crawl(price_notifier)
+
+    def start(self):
+        server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server_socket.bind(('localhost', 12345))
+        server_socket.listen(5)
+        print("Server listening on port 12345")
+
+        while self.running:
+            client_socket, address = server_socket.accept()
+            print(f"Accepted connection from {address}")
+            threading.Thread(target=self.handle_client, args=(client_socket, address)).start()
+
+    def stop(self):
+        self.running = False
+
+    def show_current_price(self, client_socket):
+        # 서브스레드가 생성되자마자 데이터 크롤링하여 클라이언트에게 송신
+        data_crawler = ItemDataCrawler("", "", "")  # 빈 값으로 초기화하여 show_current_price 용도로 사용
+        price_notifier = PriceNotifierImpl(client_socket, self.data_list)
+        data_crawler.crawl(price_notifier)
+
+class ItemDataCrawler(DataCrawler):
+    def __init__(self, product_name, desired_price, product_link):
         self.product_name = product_name
-        self.desired_price = desired_price
+        self.desired_price = int(desired_price)
         self.product_link = product_link
-        self.running_event = threading.Event()
-        self.crawled_price = None
-        self.crawled_count = 0
-        self.average_price = 0
 
-    def crawling_test(self):
+    def crawl(self, price_notifier):
         try:
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36",
@@ -33,91 +90,35 @@ class ItemWorker:
 
             if price_element:
                 # 문자열을 정수로 변환
-                self.crawled_price = int(price_element.get_text(strip=True).replace(",", "").replace("원", ""))
-                # (파이썬)클라이언트 전송 테스트용
-                self.client_socket.send(price_element.encode())
-                return True
-            else:
-                return False
+                crawled_price = int(price_element.get_text(strip=True).replace(",", "").replace("원", ""))
+                price_notifier.notify(self.product_name, crawled_price)
+
         except Exception as e:
             print(f"Exception occurred during crawling: {e}")
-            return False
 
-    def crawling_on_time(self):
-        sum_price = 0
-        while self.running_event.is_set():
-            if self.crawling_test():
-                # 현재 시간 받아옴
-                current_time = time.localtime()
-                current_time_str = time.strftime("%Y-%m-%d %H:%M:%S", current_time)
+class PriceNotifierImpl(PriceNotifier):
+    def __init__(self, client_socket, data_list):
+        self.client_socket = client_socket
+        self.data_list = data_list
 
-                # 정각일 때만 가격을 기록
-                if current_time.tm_min != 0 or current_time.tm_sec != 0:
-                    continue
-                time.sleep(1)  # 중복 방지
+    def notify(self, product_name, price):
+        # 가격 정보를 클라이언트에 전송
+        current_time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        print(f"Price at {current_time_str} for {product_name}: {price}원")
+        self.client_socket.send(f"{product_name}/{current_time_str}/{price}".encode())
 
-                # 정각에 맞춰 주기적으로 크롤링하여 가격 정보를 클라이언트에 전송
-                if self.crawled_price:
-                    # 가격을 정수로 변환하여 클라이언트에게 송신
-                    print(f"Price at {current_time_str}: {self.crawled_price}원")
-                    sum_price += self.crawled_price
+        # 데이터를 data_list에 추가하여 엑셀 파일에 저장
+        data = {'Product Name': product_name, 'Price': price, 'Time': current_time_str}
+        self.data_list.append(data)
+        self.save_to_excel()
 
-                self.crawled_count += 1
-                if self.crawled_count % 24 == 0:
-                    self.average_price = int(sum_price / 24)
-
-                    # 그래프를 작성하기 위한 날짜,가격 정보 송신
-                    data = f'{current_time.tm_mon}/{current_time.tm_mday}' + '/' + str(self.average_price)
-                    self.client_socket.send(data.encode())
-                    self.crawled_count = 0
-                    self.average_price = 0
-                    sum_price = 0
-
-    def show_current_price(self):
-        self.crawling_test()
-        print(f"Current price: {self.crawled_price}")
-        self.client_socket.send(str(self.crawled_price).encode())
-
-    def stop(self):
-        self.running_event.clear()
-        self.crawled_price = None
-        self.crawled_count = 0
-
-    def run(self):
-        self.running_event.set()
-        self.crawling_on_time()
-
-
-def handle_client(client_socket, address):
-    while True:
-        data = client_socket.recv(1024).decode()
-        if not data:
-            break
-
-        # 데이터 수신 후 '/'를 기준으로 분류하여 상품명, 구매희망가격, 상품링크를 추출합니다.
-        product_name, desired_price, product_link = data.split(',')
-
-        # 서브스레드 생성하여 ItemWorker 클래스 실행
-        item_worker = ItemWorker(client_socket, product_name, desired_price, product_link)
-        item_worker.run()
-
-    client_socket.close()
-
-
-def main(server_host, server_port):
-    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server_socket.bind((server_host, server_port))
-    server_socket.listen(5)
-    print(f"Server listening on {server_host}:{server_port}")
-
-    while True:
-        client_socket, address = server_socket.accept()
-        print(f"Accepted connection from {address}")
-        threading.Thread(target=handle_client, args=(client_socket, address)).start()
-
+    def save_to_excel(self):
+        df = pd.DataFrame(self.data_list)
+        df.to_excel('crawl_data.xlsx', index=False)
 
 if __name__ == "__main__":
-    server_host = 'localhost'
-    server_port = 12345
-    main(server_host, server_port)
+    server = Server()
+    try:
+        server.start()
+    except KeyboardInterrupt:
+        server.stop()
