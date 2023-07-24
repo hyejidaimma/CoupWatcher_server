@@ -67,7 +67,10 @@ class ItemThread(threading.Thread):
         # Clear the list for the next day
         self.hourly_prices.clear()
 
-    def save_to_excel(self, price_data):
+     def save_to_excel(self, price_data):
+        current_date = time.strftime("%m/%d") 
+        price_data.insert(0, current_date)  
+
         workbook = openpyxl.load_workbook(EXCEL_FILE)
         sheet = workbook[SHEET_NAME]
         sheet.append(price_data)
