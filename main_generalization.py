@@ -2,78 +2,30 @@ import threading
 import socket
 import time
 import requests
+import schedule as schedule
 from bs4 import BeautifulSoup
+import openpyxl
 from concurrent.futures import ThreadPoolExecutor
-import pandas as pd
 
-# 인터페이스 정의
-class DataCrawler:
-    def crawl(self):
-        pass
+# 엑셀 파일에 대한 정보를 전역 변수로 선언(일반화)
+EXCEL_FILE = "price_data.xlsx"
+SHEET_NAME = "PriceData"
 
-class PriceNotifier:
-    def notify(self, product_name, price):
-        pass
-
-class Server:
-    def __init__(self):
-        self.executor = ThreadPoolExecutor(max_workers=10)
-        self.running = True
-        self.data_list = []
-
-    def handle_client(self, client_socket, address):
-        while self.running:
-            data = client_socket.recv(1024).decode()
-            if not data:
-                break
-
-            # 'zgq'를 수신한 경우
-            if data == 'zgq':
-                self.show_current_price(client_socket)
-            else:
-                # 'zgq'가 아닌 다른 데이터인 경우, 데이터를 파싱하여 처리하기 위해 서브 스레드 생성
-                threading.Thread(target=self.process_data, args=(data, client_socket)).start()
-
-        # 클라이언트와의 연결 종료 후 정리
-        client_socket.close()
-
-    def process_data(self, data, client_socket):
-        # 데이터 파싱하여 상품명, 구매희망가격, 상품링크를 추출
-        product_name, desired_price, product_link = data.split(',')
-
-        # 스레드 풀을 사용하여 작업 처리
-        data_crawler = ItemDataCrawler(product_name, desired_price, product_link)
-        price_notifier = PriceNotifierImpl(client_socket, self.data_list)
-        data_crawler.crawl(price_notifier)
-
-    def start(self):
-        server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server_socket.bind(('localhost', 12345))
-        server_socket.listen(5)
-        print("Server listening on port 12345")
-
-        while self.running:
-            client_socket, address = server_socket.accept()
-            print(f"Accepted connection from {address}")
-            threading.Thread(target=self.handle_client, args=(client_socket, address)).start()
-
-    def stop(self):
-        self.running = False
-
-    def show_current_price(self, client_socket):
-        # 서브스레드가 생성되자마자 데이터 크롤링하여 클라이언트에게 송신
-        data_crawler = ItemDataCrawler("", "", "")  # 빈 값으로 초기화하여 show_current_price 용도로 사용
-        price_notifier = PriceNotifierImpl(client_socket, self.data_list)
-        data_crawler.crawl(price_notifier)
-
-class ItemDataCrawler(DataCrawler):
-    def __init__(self, product_name, desired_price, product_link):
+class ItemThread(threading.Thread):
+    def __init__(self, client_socket, product_name, desired_price, product_link, daily_average_time):
+        super(ItemThread, self).__init__()
+        self.client_socket = client_socket
         self.product_name = product_name
-        self.desired_price = int(desired_price)
+        self.desired_price = desired_price
         self.product_link = product_link
+        self.daily_average_time = daily_average_time
+        self.running = True
+        self.crawled_price = None
+        self.crawled_count = 0
+        self.average_price = 0
+        self.hourly_prices = []
 
-    def crawl(self, price_notifier):
+    def crawlingTest(self):
         try:
             headers = {
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36",
@@ -90,35 +42,109 @@ class ItemDataCrawler(DataCrawler):
 
             if price_element:
                 # 문자열을 정수로 변환
-                crawled_price = int(price_element.get_text(strip=True).replace(",", "").replace("원", ""))
-                price_notifier.notify(self.product_name, crawled_price)
-
+                self.crawled_price = int(price_element.get_text(strip=True).replace(",", "").replace("원", ""))
+                # (파이썬)클라이언트 전송 테스트용
+                self.client_socket.send(str(self.crawled_price).encode())
+                return self.crawled_price
+            else:
+                return 0
         except Exception as e:
             print(f"Exception occurred during crawling: {e}")
+            return 0
 
-class PriceNotifierImpl(PriceNotifier):
-    def __init__(self, client_socket, data_list):
-        self.client_socket = client_socket
-        self.data_list = data_list
+    def calculate_daily_average(self):
+        total_price = sum(self.hourly_prices)
+        num_of_data_points = len(self.hourly_prices)
 
-    def notify(self, product_name, price):
-        # 가격 정보를 클라이언트에 전송
-        current_time_str = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-        print(f"Price at {current_time_str} for {product_name}: {price}원")
-        self.client_socket.send(f"{product_name}/{current_time_str}/{price}".encode())
+        if num_of_data_points == 0:
+            print("No data points found for the day.")
+            return
 
-        # 데이터를 data_list에 추가하여 엑셀 파일에 저장
-        data = {'Product Name': product_name, 'Price': price, 'Time': current_time_str}
-        self.data_list.append(data)
-        self.save_to_excel()
+        # Daily average calculation
+        daily_average = total_price / num_of_data_points
+        print(f"Daily Average Price: {daily_average}")
 
-    def save_to_excel(self):
-        df = pd.DataFrame(self.data_list)
-        df.to_excel('crawl_data.xlsx', index=False)
+        # Clear the list for the next day
+        self.hourly_prices.clear()
+
+    def save_to_excel(self, price_data):
+        workbook = openpyxl.load_workbook(EXCEL_FILE)
+        sheet = workbook[SHEET_NAME]
+        sheet.append(price_data)
+        workbook.save(EXCEL_FILE)
+        workbook.close()
+
+    def showCurrentPrice(self):
+        self.crawlingTest()
+        print(f"Current price: {self.crawled_price}")
+        self.client_socket.send(str(self.crawled_price).encode())
+
+    def killThread(self):
+        self.running = False
+        self.crawled_price = None
+        self.crawled_count = 0
+
+    def run(self):
+        # 00:00부터 23:00까지 매 시 정각마다 크롤링을 수행하고 가격을 hourly_prices에 저장
+        for hour in range(24):
+            time_str = f"{hour:02d}:00"
+            schedule.every().day.at(time_str).do(self.crawlingTest).tag(time_str)  # Add tag for each job
+
+        # 매일 23:59에 calculate_daily_average() 함수를 실행하여 일평균 가격을 계산
+        schedule.every().day.at(self.daily_average_time).do(self.calculate_daily_average)
+
+class PriceServer:
+    def __init__(self):
+        try:
+            workbook = openpyxl.load_workbook(EXCEL_FILE)
+            workbook.close()
+        except FileNotFoundError:
+            workbook = openpyxl.Workbook()
+            workbook.save(EXCEL_FILE)
+            workbook.close()
+
+        # 서버 설정
+        self.server_host = 'localhost'
+        self.server_port = 12345
+        self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.server_socket.bind((self.server_host, self.server_port))
+        self.server_socket.listen(5)
+        print(f"Server listening on {self.server_host}:{self.server_port}")
+
+        # 아이템별 일평균 계산 시간 설정
+        self.item_daily_average_time = "23:59"  # 매일 23:59에 일평균 계산
+
+        # 스레드풀 생성 (최대 10개의 스레드)
+        self.thread_pool = ThreadPoolExecutor(max_workers=10)
+
+    def handle_client(self, client_socket, address):
+        while True:
+            data = client_socket.recv(1024).decode()
+            if not data:
+                break
+    
+            product_name, desired_price, product_link = data.split(',')
+            item_thread = ItemThread(client_socket, product_name, desired_price, product_link)
+            item_thread.start()
+    
+        client_socket.close()
+
+    def start(self):
+        while True:
+            client_socket, address = self.server_socket.accept()
+            print(f"Accepted connection from {address}")
+
+            data = client_socket.recv(1024).decode()
+            if not data:
+                client_socket.close()
+                continue
+
+            product_name, desired_price, product_link = data.split(',')
+            item_thread = ItemThread(client_socket, product_name, desired_price, product_link, self.item_daily_average_time)
+            # 스레드풀에 스레드 추가 및 실행
+            self.thread_pool.submit(item_thread.start)
 
 if __name__ == "__main__":
-    server = Server()
-    try:
-        server.start()
-    except KeyboardInterrupt:
-        server.stop()
+    price_server = PriceServer()
+    price_server.start()
